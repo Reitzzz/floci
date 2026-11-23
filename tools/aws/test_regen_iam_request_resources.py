@@ -1458,6 +1458,10 @@ def test_the_vendored_file_is_well_formed():
     # An SQS request names its queue by URL, which SQS finds as its handlers do; a create names it by name.
     assert operations["sqs:SendMessage"]["resources"] == [{"type": "queue", "fill": {}, "find": ["QueueUrl"]}]
     assert operations["sqs:CreateQueue"]["resources"] == [{"type": "queue", "fill": {"QueueName": "QueueName"}}]
+    # Transfer Family is read whole: a server by its id, a user by its server and name.
+    assert "transfer" in document["namespaces"] and "transfer" not in document["notCovered"]
+    assert operations["transfer:DescribeUser"]["resources"] == [
+        {"type": "user", "fill": {"ServerId": "ServerId", "UserName": "UserName"}}]
     # CloudWatch is read whole: each alarm a list names, and a dashboard by its name, its ARN with no Region.
     assert "cloudwatch" in document["namespaces"] and "cloudwatch" not in document["notCovered"]
     assert operations["cloudwatch:DeleteAlarms"]["resources"] == [
