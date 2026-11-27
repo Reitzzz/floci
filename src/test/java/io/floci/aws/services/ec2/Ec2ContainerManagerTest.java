@@ -88,6 +88,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 import java.util.zip.GZIPOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -1003,7 +1004,8 @@ class Ec2ContainerManagerTest {
 
     @Test
     void userDataExecutionCommandRunsScriptDirectlySoShebangIsHonored() {
-        assertArrayEquals(new String[]{"/var/lib/user-data.sh"}, Ec2ContainerManager.userDataExecutionCommand());
+        assertArrayEquals(UserDataPipeline.executionCommand(UserDataPipeline.CLOUD_INIT_OUTPUT_LOG_PATH),
+                Ec2ContainerManager.userDataExecutionCommand());
     }
 
     @Test
@@ -1902,7 +1904,8 @@ class Ec2ContainerManagerTest {
         verify(harness.builder).withReadOnlyBind("/lib/modules/6.8.0-test", "/lib/modules/6.8.0-test");
         verify(harness.builder, never()).withReadOnlyBind(eq("/lib/modules"), anyString());
         // User data runs after the sshd step, so once it has started that step is settled.
-        awaitUntil(() -> commandIndex(harness.executedCommands, "/var/lib/user-data.sh") >= 0, Duration.ofSeconds(2));
+        awaitUntil(() -> commandIndex(harness.executedCommands, Ec2ContainerManagerTest::isUserDataCommand) >= 0,
+                Duration.ofSeconds(2));
         assertEquals(-1, commandIndex(harness.executedCommands, "/usr/sbin/sshd"),
                 "a systemd guest's init starts sshd; Floci must not start a second one");
         verify(harness.lifecycleManager).create(any(ContainerSpec.class), eq("linux/arm64"));
@@ -2346,8 +2349,10 @@ class Ec2ContainerManagerTest {
         assertTrue(userDataStarted.await(2, TimeUnit.SECONDS), "user data should start");
         verify(copy).withRemotePath("/var/lib");
         verify(copy, never()).withRemotePath("/tmp");
-        assertTrue(harness.executedCommands.stream()
-                .anyMatch(command -> Arrays.equals(command, new String[]{"/var/lib/user-data.sh"})));
+        assertTrue(harness.executedCommands.stream().anyMatch(command ->
+                        Arrays.equals(command,
+                                UserDataPipeline.executionCommand(UserDataPipeline.CLOUD_INIT_OUTPUT_LOG_PATH))),
+                "launch must pass the guest logging wrapper to the user-data exec");
     }
 
     @Test
@@ -2515,7 +2520,8 @@ class Ec2ContainerManagerTest {
         harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
 
         // UserData is the next step after sshd, so its exec marks sshd startup as finished.
-        awaitUntil(() -> commandIndex(harness.executedCommands, "/var/lib/user-data.sh") >= 0, Duration.ofSeconds(2));
+        awaitUntil(() -> commandIndex(harness.executedCommands, Ec2ContainerManagerTest::isUserDataCommand) >= 0,
+                Duration.ofSeconds(2));
         assertEquals(-1, commandIndex(harness.executedCommands, "/usr/local/sbin/sshd"));
     }
 
@@ -2913,8 +2919,7 @@ class Ec2ContainerManagerTest {
         });
         when(execCreate.exec()).thenAnswer(invocation -> {
             String[] command = currentCommand.get();
-            return command != null && command.length == 1 && "/var/lib/user-data.sh".equals(command[0])
-                    ? userDataExec : metadataExec;
+            return command != null && isUserDataCommand(command) ? userDataExec : metadataExec;
         });
 
         Answer<ExecStartCmd> start = invocation -> {
@@ -2952,12 +2957,28 @@ class Ec2ContainerManagerTest {
      * Index of the first exec matching {@code expected} exactly, or -1 when it was never run.
      */
     private static int commandIndex(List<String[]> executedCommands, String... expected) {
+        return commandIndex(executedCommands, command -> Arrays.equals(command, expected));
+    }
+
+    private static int commandIndex(List<String[]> executedCommands, Predicate<String[]> predicate) {
         for (int i = 0; i < executedCommands.size(); i++) {
-            if (Arrays.equals(executedCommands.get(i), expected)) {
+            if (predicate.test(executedCommands.get(i))) {
                 return i;
             }
         }
         return -1;
+    }
+
+    private static boolean isUserDataCommand(String[] command) {
+        if (command == null) {
+            return false;
+        }
+        for (String argument : command) {
+            if (argument != null && argument.contains(UserDataPipeline.USER_DATA_SCRIPT_PATH)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static Instance instance(String instanceId) {
@@ -3293,7 +3314,7 @@ class Ec2ContainerManagerTest {
             });
             when(execCreate.exec()).thenAnswer(invocation -> {
                 String[] command = currentCommand.get();
-                if (command != null && command.length == 1 && "/var/lib/user-data.sh".equals(command[0])) {
+                if (command != null && isUserDataCommand(command)) {
                     return userDataExec;
                 }
                 return metadataExec;
